@@ -2,7 +2,18 @@ export enum AppState {
   IDLE = 'IDLE',
   PROCESSING = 'PROCESSING',
   PREVIEW = 'PREVIEW',
-  ERROR = 'ERROR'
+  ERROR = 'ERROR',
+  STRATEGIZING = 'STRATEGIZING',
+  ANALYZING_GAPS = 'ANALYZING_GAPS'
+}
+
+export type CVLength = 'Executive' | 'Short' | 'Comprehensive';
+
+export interface HRGap {
+  id: string;
+  question: string;
+  context: string;
+  answer?: string;
 }
 
 export type ViewMode = 'preview' | 'markdown';
@@ -42,30 +53,30 @@ export interface ProcessingError {
 // ENHANCED CV TAXONOMY TYPES
 // ============================================
 
-export type ExperienceType = 
-  | 'full-time' 
-  | 'part-time' 
-  | 'freelance' 
-  | 'side_project' 
-  | 'sabbatical' 
-  | 'founding' 
-  | 'volunteering' 
-  | 'caregiving' 
+export type ExperienceType =
+  | 'full-time'
+  | 'part-time'
+  | 'freelance'
+  | 'side_project'
+  | 'sabbatical'
+  | 'founding'
+  | 'volunteering'
+  | 'caregiving'
   | 'travel';
 
-export type LifePhaseType = 
-  | 'formation' 
-  | 'professional' 
-  | 'passion-turned-profession' 
-  | 'transition' 
+export type LifePhaseType =
+  | 'formation'
+  | 'professional'
+  | 'passion-turned-profession'
+  | 'transition'
   | 'sabbatical';
 
-export type AccomplishmentType = 
-  | 'publication' 
-  | 'project' 
-  | 'award' 
-  | 'speaking' 
-  | 'patent' 
+export type AccomplishmentType =
+  | 'publication'
+  | 'project'
+  | 'award'
+  | 'speaking'
+  | 'patent'
   | 'certification';
 
 export type ProjectStatus = 'active' | 'completed' | 'archived' | 'on-hold';
@@ -90,6 +101,7 @@ export interface Personal {
   location: string;
   contact: Contact;
   social: Social;
+  photo?: string; // Base64 or URL
 }
 
 export interface StyleMeta {
@@ -216,6 +228,11 @@ export interface CVData {
   certifications?: Certification[];
   languages?: Language[];
   interests?: string[];
+}
+
+export interface JobStrategy {
+  idea: string;
+  recommendations: string[];
 }
 
 // Theme definition for Hugo export

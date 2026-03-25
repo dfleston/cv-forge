@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, FileText, Download, Wand2, AlertCircle, CheckCircle2, Loader2, Printer, Eye, Code, RefreshCw } from 'lucide-react';
+import { Upload, FileText, Download, Wand2, AlertCircle, CheckCircle2, Loader2, Printer, Eye, Code, RefreshCw, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { THEMES, INITIAL_MARKDOWN, NARRATIVE_STYLES } from './constants';
 import { AppState, ProcessingError, Theme, NarrativeStyle, ViewMode } from './types';
 import { MarkdownRenderer } from './components/MarkdownRenderer';
 import { extractTextFromDocx, readFileAsBase64 } from './services/fileUtils';
-import { processResume } from './services/gemini';
-import { exportHugoFormat, extractNameFromMarkdown } from './services/exportUtils';
+import { processResume, generateApplicationStrategy, analyzeResumeGaps } from './services/gemini';
+import { exportHugoFormat, extractNameFromMarkdown, parseFrontmatterAndBody } from './services/exportUtils';
+import { JobStrategy, CVLength, HRGap } from './types';
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
@@ -24,12 +25,23 @@ const App: React.FC = () => {
 
   // Track if narrative style or enrichment has changed since last generation
   const [needsRegeneration, setNeedsRegeneration] = useState(false);
+  const [photo, setPhoto] = useState<string | null>(null);
+
+  // Job Customization
+  const [jobDescription, setJobDescription] = useState<string>('');
+  const [strategy, setStrategy] = useState<JobStrategy | null>(null);
+  const [isGeneratingStrategy, setIsGeneratingStrategy] = useState(false);
+
+  // HR Gaps & Length
+  const [cvLength, setCvLength] = useState<CVLength>('Short');
+  const [hrGaps, setHrGaps] = useState<HRGap[]>([]);
+  const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
 
   useEffect(() => {
     if (appState === AppState.PREVIEW && rawFile) {
       setNeedsRegeneration(true);
     }
-  }, [currentNarrative, enrichmentText]);
+  }, [currentNarrative, enrichmentText, strategy, cvLength, hrGaps]);
 
   const handleDownloadPdf = () => {
     const element = document.getElementById('resume-preview');
@@ -51,7 +63,8 @@ const App: React.FC = () => {
       filename: 'resume.pdf',
       image: { type: 'jpeg', quality: 0.98 },
       html2canvas: { scale: 2, useCORS: true, letterRendering: true },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
     };
 
     html2pdf()
@@ -98,7 +111,10 @@ const App: React.FC = () => {
     setNeedsRegeneration(false);
 
     try {
-      const resultMd = await processResume(input, currentNarrative.id, input.fileName, enrichmentText);
+      // If photo exists, we should probably inject it into the markdown/yaml if it's not already there
+      // or handle it in the StructuredCV. For now, we'll keep it in app state.
+
+      const resultMd = await processResume(input, currentNarrative.id, cvLength, hrGaps, input.fileName, enrichmentText, strategy || undefined);
       setMarkdown(resultMd);
       setAppState(AppState.PREVIEW);
       // Ensure view is back to preview on success so they see the result
@@ -110,6 +126,72 @@ const App: React.FC = () => {
         message: err.message || "An unexpected error occurred while processing your resume."
       });
       setAppState(AppState.ERROR);
+    }
+  };
+
+  const handleGenerateStrategy = async () => {
+    if (!jobDescription) return;
+    setIsGeneratingStrategy(true);
+    try {
+      const newStrategy = await generateApplicationStrategy(jobDescription, markdown);
+      setStrategy(newStrategy);
+    } catch (err: any) {
+      console.error(err);
+      setError({
+        title: "Strategy Failed",
+        message: err.message || "Failed to generate application strategy."
+      });
+    } finally {
+      setIsGeneratingStrategy(false);
+    }
+  };
+
+  const handleAnalyzeGaps = async () => {
+    if (!rawFile) return;
+    setAppState(AppState.ANALYZING_GAPS);
+    setIsAnalyzingGaps(true);
+    setError(null);
+    try {
+      const gaps = await analyzeResumeGaps(rawFile.data);
+      setHrGaps(gaps);
+      setAppState(AppState.IDLE);
+    } catch (err: any) {
+      console.error(err);
+      setError({
+        title: "Analysis Failed",
+        message: err.message || "Failed to analyze resume for gaps."
+      });
+      setAppState(AppState.IDLE);
+    } finally {
+      setIsAnalyzingGaps(false);
+    }
+  };
+
+  const handleForge = () => {
+    if (rawFile) {
+      handleProcessResume(rawFile);
+    }
+  };
+
+  const handlePhotoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const base64 = await readFileAsBase64(file);
+      setPhoto(base64);
+
+      // Update markdown if we already have it
+      if (markdown) {
+        const parsed = parseFrontmatterAndBody(markdown);
+        if (parsed) {
+          // Simplistic injection of photo into frontmatter
+          const updatedMd = markdown.replace(/personal:\n/, `personal:\n    photo: "${base64}"\n`);
+          setMarkdown(updatedMd);
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
     }
   };
 
@@ -140,7 +222,7 @@ const App: React.FC = () => {
       }
 
       setRawFile(inputData);
-      handleProcessResume(inputData);
+      setNeedsRegeneration(true);
 
     } catch (err: any) {
       console.error(err);
@@ -256,6 +338,24 @@ const App: React.FC = () => {
                   <span className="text-sm text-green-700">Content extracted & formatted</span>
                 </div>
               )}
+
+              {/* Photo Upload */}
+              <div className="pt-2">
+                <input
+                  type="file"
+                  id="photo-upload"
+                  className="hidden"
+                  accept="image/*"
+                  onChange={handlePhotoUpload}
+                />
+                <label
+                  htmlFor="photo-upload"
+                  className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg cursor-pointer transition-colors"
+                >
+                  <ImageIcon className="w-3.5 h-3.5" />
+                  {photo ? "Change Photo" : "Add Photo"}
+                </label>
+              </div>
             </div>
 
             {/* Narrative Strategy */}
@@ -295,10 +395,29 @@ const App: React.FC = () => {
               </div>
             </div>
 
+            {/* Target Length */}
+            <div className="space-y-4">
+              <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">3. Target Length</h2>
+              <div className="flex bg-gray-100 p-1 rounded-lg">
+                {(['Executive', 'Short', 'Comprehensive'] as CVLength[]).map(l => (
+                  <button
+                    key={l}
+                    onClick={() => setCvLength(l)}
+                    className={`flex-1 text-xs py-1.5 rounded-md font-medium transition-all ${cvLength === l ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
+                  >
+                    {l}
+                    <span className="block text-[9px] opacity-70 font-normal">
+                      {l === 'Executive' ? '1 Page' : l === 'Short' ? '2 Pages' : 'Max 4 Pages'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Enrichment Section */}
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">3. Enrich & Refine</h2>
+                <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">4. Enrich & Refine</h2>
                 <Wand2 className="w-3.5 h-3.5 text-blue-500" />
               </div>
               <div className="bg-blue-50/50 border border-blue-100 rounded-lg p-4 space-y-3">
@@ -309,24 +428,106 @@ const App: React.FC = () => {
                   value={enrichmentText}
                   onChange={(e) => setEnrichmentText(e.target.value)}
                   placeholder="e.g. I built a SaaS in my spare time using Rust. I want to transition into Lead AI roles."
-                  className="w-full h-32 p-3 text-xs bg-white border border-blue-100 rounded-md focus:ring-2 focus:ring-blue-500 outline-none resize-none shadow-inner"
+                  className="w-full h-24 p-3 text-xs bg-white border border-blue-100 rounded-md focus:ring-2 focus:ring-blue-500 outline-none resize-none shadow-inner"
                 />
               </div>
-
-              {needsRegeneration && rawFile && (
-                <button
-                  onClick={handleRegenerate}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg shadow-sm transition-all text-sm font-medium animate-pulse"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  Regenerate with Enrichment
-                </button>
-              )}
             </div>
+
+            {/* Customize Section */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">5. Customize for Job</h2>
+                <Sparkles className="w-3.5 h-3.5 text-purple-500" />
+              </div>
+              <div className="bg-purple-50 border border-purple-100 rounded-lg p-4 space-y-3">
+                <p className="text-[10px] text-purple-700 font-medium leading-relaxed">
+                  Paste the job description or LinkedIn URL. Gemini will propose a strategy to stand out.
+                </p>
+                <textarea
+                  value={jobDescription}
+                  onChange={(e) => setJobDescription(e.target.value)}
+                  placeholder="Paste Job Offer or URL here..."
+                  className="w-full h-24 p-3 text-xs bg-white border border-purple-100 rounded-md focus:ring-2 focus:ring-purple-500 outline-none resize-none shadow-inner"
+                />
+                <button
+                  onClick={handleGenerateStrategy}
+                  disabled={isGeneratingStrategy || !jobDescription}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+                >
+                  {isGeneratingStrategy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                  {strategy ? "Regenerate Strategy" : "Generate Strategy Idea"}
+                </button>
+
+                {strategy && (
+                  <div className="mt-3 p-3 bg-white border border-purple-200 rounded-lg space-y-2">
+                    <p className="text-[11px] font-bold text-gray-900">{strategy.idea}</p>
+                    <ul className="space-y-1">
+                      {strategy.recommendations.map((r, i) => (
+                        <li key={i} className="text-[10px] text-gray-600 flex gap-1.5">
+                          <span className="text-purple-400">•</span>
+                          {r}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* HR Gap Analysis */}
+            {rawFile && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">6. HR Gap Analysis</h2>
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-500" />
+                </div>
+                <div className="bg-rose-50 border border-rose-100 rounded-lg p-4 space-y-3">
+                  <p className="text-[10px] text-rose-700 font-medium leading-relaxed">
+                    Have an AI Senior Recruiter review your CV and identify vague achievements or critical gaps.
+                  </p>
+
+                  {hrGaps.length === 0 ? (
+                    <button
+                      onClick={handleAnalyzeGaps}
+                      disabled={isAnalyzingGaps}
+                      className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+                    >
+                      {isAnalyzingGaps ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                      Analyze CV for Gaps
+                    </button>
+                  ) : (
+                    <div className="space-y-4">
+                      {hrGaps.map((gap, index) => (
+                        <div key={gap.id} className="space-y-2 bg-white p-3 rounded-md border border-rose-200">
+                          <p className="text-[10px] text-slate-500 italic">{gap.context}</p>
+                          <p className="text-xs font-bold text-slate-900">{gap.question}</p>
+                          <textarea
+                            value={gap.answer || ''}
+                            onChange={(e) => {
+                              const newGaps = [...hrGaps];
+                              newGaps[index].answer = e.target.value;
+                              setHrGaps(newGaps);
+                            }}
+                            placeholder="Provide your answer here to strengthen the CV..."
+                            className="w-full h-16 p-2 text-xs bg-gray-50 border border-gray-200 rounded-md focus:ring-2 focus:ring-rose-500 outline-none resize-none"
+                          />
+                        </div>
+                      ))}
+                      <button
+                        onClick={handleAnalyzeGaps}
+                        className="w-full py-1.5 text-xs text-rose-600 font-medium hover:bg-rose-100 rounded-md transition-colors"
+                      >
+                        Re-Analyze Gaps
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Visual Theme Selector */}
             <div className="space-y-4">
-              <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">4. Visual Design</h2>
+              <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wider">7. Visual Design</h2>
               <div className="grid grid-cols-1 gap-2">
                 {THEMES.map((theme) => (
                   <button
@@ -350,6 +551,29 @@ const App: React.FC = () => {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Trigger Button */}
+            <div className="pt-4 pb-8 px-6">
+              <button
+                onClick={handleForge}
+                disabled={appState === AppState.PROCESSING || !rawFile}
+                className={`
+                  w-full flex flex-col items-center justify-center gap-1 p-4 rounded-xl shadow-lg transition-all
+                  ${needsRegeneration
+                    ? 'bg-blue-600 hover:bg-blue-700 text-white animate-pulse ring-4 ring-blue-500/20'
+                    : 'bg-white border border-gray-200 text-gray-400 hover:text-gray-600'}
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                `}
+              >
+                <div className="flex items-center gap-2">
+                  {appState === AppState.PROCESSING ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
+                  <span className="text-base font-bold">Forge Final CV</span>
+                </div>
+                <span className="text-[10px] opacity-80 font-medium">
+                  {needsRegeneration ? "Apply all changes and generate" : "Content is up to date"}
+                </span>
+              </button>
             </div>
 
           </div>

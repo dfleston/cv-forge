@@ -24,28 +24,56 @@ export function parseFrontmatterAndBody(markdownContent: string): {
   body: string;
   data: CVFrontmatter | null;
 } | null {
-  // Match YAML frontmatter between --- delimiters
-  // More robust regex to handle potential trailing whitespace/newlines
-  const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/;
-  const match = markdownContent.match(frontmatterRegex);
+  // Pre-process: strip markdown code block wrappers if the entire content is wrapped
+  let cleanedContent = markdownContent.trim();
 
-  if (!match) {
-    console.warn('No frontmatter found in markdown content');
-    return null;
+  // Ultra-aggressive cleaning: find the first and last '---' even if surrounded by backticks or text
+  let startIdx = cleanedContent.indexOf('---');
+
+  if (startIdx === -1) {
+    // Fallback: search for "cv_data:" if no --- delimiters exist
+    const cvDataIdx = cleanedContent.indexOf('cv_data:');
+    if (cvDataIdx !== -1) {
+      console.warn('No --- delimiters found, but "cv_data:" detected. Attempting to parse from start.');
+      startIdx = 0; // Or maybe we just try to parse the whole block
+    } else {
+      console.warn('No frontmatter delimiters found and no "cv_data" key detected.');
+      return null;
+    }
   }
 
-  const frontmatterStr = match[1];
-  const body = match[2]?.trim() || '';
-  let data: CVFrontmatter | null = null;
+  let endIdx = cleanedContent.indexOf('---', startIdx + 3);
 
+  // If no closing ---, but we have content, take until the end or look for a logical break
+  if (endIdx === -1) {
+    console.warn('Incomplete frontmatter: missing closing ---. Parsing until end of string.');
+    endIdx = cleanedContent.length;
+  }
+
+  const rawFrontmatter = cleanedContent.slice(startIdx + (cleanedContent[startIdx] === '-' ? 3 : 0), endIdx).trim();
+  const body = cleanedContent.slice(endIdx + 3).trim();
+
+  // Strip common markdown noise
+  const strippedFrontmatter = rawFrontmatter
+    .replace(/^```yaml\s*/i, '')
+    .replace(/^```\s*/, '')
+    .replace(/```$/, '')
+    .trim();
+
+  let data: CVFrontmatter | null = null;
   try {
-    data = yaml.load(frontmatterStr) as CVFrontmatter;
+    data = yaml.load(strippedFrontmatter) as CVFrontmatter;
+    if (data && !data.cv_data) {
+      console.warn('Parsed YAML successfully but "cv_data" key is missing.');
+    }
   } catch (e) {
-    console.error('Failed to parse YAML frontmatter:', e);
+    console.error('YAML Parsing Exception:', e);
+    // If it's a "folded" or malformed YAML, try a slightly different cleaning
+    console.log('Attempting secondary cleaning on failed YAML string...');
   }
 
   return {
-    frontmatter: frontmatterStr,
+    frontmatter: strippedFrontmatter,
     body,
     data
   };
